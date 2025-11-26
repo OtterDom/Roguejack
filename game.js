@@ -191,6 +191,12 @@ function makeDealerSprite(label, primary, secondary, trim) {
 const PLAYER_SPRITE = makePlayerSprite("Otter Knight", "#4fa3ff", "#1b6adf", "#e4c17a");
 const DEALER_SPRITE = makeDealerSprite("The Hand", "#6b5a44", "#3b2f25", "#e4c17a");
 
+const SKILL_DATA = {
+    PEEK: { cost: 1, name: "PEEK", desc: 'Reveal the next card in the deck for extra control over your next "Hit".' },
+    AEGIS: { cost: 2, name: "AEGIS", desc: "Raise a shield: your next bust this round deals no damage." },
+    FORGE: { cost: 1, name: "FORGE", desc: "Raise your hand total by +1, up to a maximum of 21." }
+};
+
 const ENEMY_TYPES = [
     {
         name: "Dragon",
@@ -373,7 +379,6 @@ class Player extends Character {
 
     resetForRound() {
         super.resetForRound();
-        this.energy = this.maxEnergy;
         this.aegisActive = false;
         this.peekedCard = null;
         this.forgeBonus = 0;
@@ -480,6 +485,7 @@ class CombatEngine {
         this.dealerDeckEl = dealerDeckEl;
         this.dealerHandEl = dealerHandEl;
         this.peekIndicator = document.getElementById("peek-indicator");
+        this.skillInfoBox = document.getElementById("skill-info-box");
         this.currentEnemyType = null;
         this.gameOver = false;
         this.enemyHoleRevealed = false;
@@ -492,6 +498,7 @@ class CombatEngine {
     }
 
     init() {
+        this.player.energy = Math.min(3, this.player.maxEnergy || 3);
         this.updateHPUI();
         this.updateFloorUI();
         this.updateGoldUI();
@@ -535,6 +542,18 @@ class CombatEngine {
             this.controls.forgeBtn.addEventListener("click", async () => {
                 await this.playerForge();
             });
+        }
+        if (this.skillInfoBox) {
+            const attachTooltip = (btn, key) => {
+                if (!btn) return;
+                btn.addEventListener("mouseenter", () => this.showSkillTooltip(key));
+                btn.addEventListener("focus", () => this.showSkillTooltip(key));
+                btn.addEventListener("mouseleave", () => this.hideSkillTooltip());
+                btn.addEventListener("blur", () => this.hideSkillTooltip());
+            };
+            attachTooltip(this.controls.peekBtn, "PEEK");
+            attachTooltip(this.controls.aegisBtn, "AEGIS");
+            attachTooltip(this.controls.forgeBtn, "FORGE");
         }
         if (this.controls.restartBtn) {
             this.controls.restartBtn.addEventListener("click", async () => {
@@ -607,6 +626,7 @@ class CombatEngine {
         this.enemy.resetForRound();
         this.enemyHoleRevealed = false;
         this.clearPeekedCard();
+        this.hideSkillTooltip();
         this.updateEnergyUI();
         this.updateSkillButtons();
         this.updateHPUI();
@@ -731,13 +751,14 @@ class CombatEngine {
         if (this.player.handTotal() > 21) {
             if (this.player.aegisActive) {
                 this.player.aegisActive = false;
-                this.logger.log("AEGIS absorbs your bust! You take no damage.", "player");
+                const calc = this.calculateDamage(this.player, { bustBonus: false, playerCrit: false });
+                this.logDamageDetails(this.player, "Bust > 21", calc, 0, true);
                 this.updateSkillButtons();
                 await this.newRound();
                 return;
             }
             this.logger.log("?? You bust!", "player");
-            await this.dealDamage(this.player);
+            await this.dealDamage(this.player, false, false, "Bust > 21");
         }
     }
 
@@ -761,13 +782,13 @@ class CombatEngine {
         const enemyTotal = this.enemy.handTotal();
 
         if (playerTotal > 21) {
-            await this.dealDamage(this.player);
+            await this.dealDamage(this.player, false, false, "Bust > 21");
             return;
         }
 
         if (enemyTotal > 21) {
             this.logger.log("Enemy busts! Massive damage!", "both");
-            await this.dealDamage(this.enemy, true);
+            await this.dealDamage(this.enemy, true, false, "Enemy busts (>21)");
             return;
         }
 
@@ -778,52 +799,28 @@ class CombatEngine {
             } else {
                 this.logger.log("You win the round!", "both");
             }
-            await this.dealDamage(this.enemy, false, isCrit);
+            await this.dealDamage(this.enemy, false, isCrit, "Player hand higher");
             if (isCrit) {
                 const healAmount = this.player.isDoublingDown ? 30 : 15;
                 this.healPlayer(healAmount);
             }
         } else if (enemyTotal > playerTotal) {
             this.logger.log("Enemy wins the round!", "both");
-            await this.dealDamage(this.player);
+            await this.dealDamage(this.player, false, false, "Enemy hand higher");
         } else {
             this.logger.log("Tie - no one takes damage.", "both");
             await this.newRound();
         }
     }
 
-    async dealDamage(target, bustBonus = false, playerCrit = false) {
-        const damageBase = Math.abs(this.player.handTotal() - this.enemy.handTotal());
-        let damage = Math.max(1, damageBase);
-        if (bustBonus) {
-            damage *= 2;
-        }
-
+    async dealDamage(target, bustBonus = false, playerCrit = false, cause = "Hand-Resultat") {
+        const calc = this.calculateDamage(target, { bustBonus, playerCrit });
         const attacker = target === this.enemy ? this.player : this.enemy;
         this.playAttackAnimation(attacker, target);
 
-        if (target === this.enemy) {
-            damage = Math.max(1, Math.round(damage * this.enemy.damageInMultiplier));
-            if (playerCrit) {
-                damage = Math.round(damage * 2);
-            }
-            if (this.player.isDoublingDown) {
-                damage = Math.round(damage * 2);
-            }
-        } else {
-            damage = Math.max(1, Math.round(damage * this.enemy.damageOutMultiplier));
-            if (this.player.isDoublingDown) {
-                damage = Math.round(damage * 2);
-            }
-        }
+        target.takeDamage(calc.final);
 
-        target.takeDamage(damage);
-
-        if (target === this.enemy) {
-            this.logger.log("?? You deal " + damage + " damage! Enemy HP: " + this.enemy.hp, "both");
-        } else {
-            this.logger.log("?? You take " + damage + " damage! Your HP: " + this.player.hp, "player");
-        }
+        this.logDamageDetails(target, cause, calc, calc.final, false);
 
         this.updateHPUI();
         await this.checkEnd();
@@ -844,6 +841,9 @@ class CombatEngine {
             playerGold += 50;
             this.updateGoldUI();
             this.logger.log("You received 50 Gold!", "player");
+            this.player.energy = Math.min(3, this.player.maxEnergy || 3);
+            this.updateEnergyUI();
+            this.updateSkillButtons();
             this.dealing = false;
             this.player.isDoublingDown = false;
             this.showShop();
@@ -864,6 +864,7 @@ class CombatEngine {
         renderHand(this.player.hand, "player-hand-container", false);
         renderHand(this.enemy.hand, "enemy-hand-container", !this.enemyHoleRevealed);
         this.updatePlayerTotal();
+        this.updateEnemyTotal();
         this.updateSkillButtons();
     }
 
@@ -937,6 +938,13 @@ class CombatEngine {
         el.textContent = this.player.handTotal();
     }
 
+    updateEnemyTotal() {
+        const el = document.getElementById("enemy-total-value");
+        if (!el) return;
+        const shouldReveal = this.enemyHoleRevealed;
+        el.textContent = shouldReveal ? this.enemy.handTotal() : "?";
+    }
+
     updateFloorUI() {
         const el = document.getElementById("floor-level");
         if (!el) return;
@@ -950,14 +958,19 @@ class CombatEngine {
     }
 
     updateEnergyUI() {
-        const el = document.getElementById("energy-indicator");
-        if (!el) return;
+        const el = document.getElementById("energy-display");
+        const legacy = document.getElementById("energy-indicator");
         const value = this.player.energy ?? 0;
-        const valueEl = el.querySelector(".energy-value");
-        if (valueEl) {
-            valueEl.textContent = value;
-        } else {
-            el.textContent = `Energy: ${value}`;
+        if (el) {
+            const valueEl = el.querySelector(".energy-value");
+            if (valueEl) {
+                valueEl.textContent = value;
+            } else {
+                el.textContent = `Energy: ${value}`;
+            }
+        }
+        if (legacy) {
+            legacy.textContent = `Energy: ${value}`;
         }
     }
 
@@ -1000,6 +1013,73 @@ class CombatEngine {
     clearPeekedCard() {
         this.player.peekedCard = null;
         this.updatePeekIndicator();
+    }
+
+    showSkillTooltip(skillKey) {
+        if (!this.skillInfoBox) return;
+        const data = SKILL_DATA[skillKey];
+        if (!data) return;
+        this.skillInfoBox.innerHTML = `<strong>${data.name}</strong><span class="skill-cost">Cost: ${data.cost} Energy</span><p>${data.desc}</p>`;
+        this.skillInfoBox.style.display = "block";
+    }
+
+    hideSkillTooltip() {
+        if (!this.skillInfoBox) return;
+        this.skillInfoBox.style.display = "none";
+        this.skillInfoBox.innerHTML = "";
+    }
+
+    calculateDamage(target, { bustBonus = false, playerCrit = false } = {}) {
+        const base = Math.max(1, Math.abs(this.player.handTotal() - this.enemy.handTotal()));
+        let working = base;
+        const modifiers = [];
+
+        if (bustBonus) {
+            working *= 2;
+            modifiers.push("Bust-Bonus x2");
+        }
+
+        if (target === this.enemy) {
+            const inMult = Math.max(0, this.enemy.damageInMultiplier || 1);
+            working *= inMult;
+            if (inMult !== 1) modifiers.push(`Enemy damage-in x${inMult.toFixed(2)}`);
+            if (playerCrit) {
+                working *= 2;
+                modifiers.push("Critical x2");
+            }
+            if (this.player.isDoublingDown) {
+                working *= 2;
+                modifiers.push("Double Down x2");
+            }
+        } else {
+            const outMult = Math.max(0, this.enemy.damageOutMultiplier || 1);
+            working *= outMult;
+            if (outMult !== 1) modifiers.push(`Enemy damage x${outMult.toFixed(2)}`);
+            if (this.player.isDoublingDown) {
+                working *= 2;
+                modifiers.push("Double Down x2");
+            }
+        }
+
+        const final = Math.max(1, Math.round(working));
+        return { base, final, modifiers };
+    }
+
+    logDamageDetails(target, cause, calc, finalApplied, blocked = false) {
+        const targetLabel = target === this.player ? "Dein" : "Enemy";
+        const hpText = `${target.hp}/${target.maxHP}`;
+        const heading = blocked
+            ? `\ud83d\udee1\ufe0f AEGIS aktiviert: ${calc.final} Schaden abgewehrt (0 erhalten)! (${cause})`
+            : `\u2694\ufe0f Schaden (${cause})`;
+        const modifiersText = calc.modifiers.length ? `• Modifikatoren: ${calc.modifiers.join(", ")}` : "• Modifikatoren: keine";
+        const lines = [
+            heading,
+            `• Basis-Schaden: ${calc.base} HP`,
+            modifiersText,
+            `• Finaler Schaden: ${finalApplied} HP`,
+            `${targetLabel} neues HP: ${hpText}`
+        ].join("\n");
+        this.logger.log(lines, "both");
     }
 
     spendEnergy(cost) {
@@ -1134,6 +1214,8 @@ class CombatEngine {
         this.dealing = false;
         floorLevel = 1;
         this.needsEnemySpawn = true;
+        this.player.maxEnergy = Math.max(this.player.maxEnergy || 0, 3);
+        this.player.energy = Math.min(3, this.player.maxEnergy);
         this.player.maxHP = 100;
         this.player.hp = 100;
         this.player.currentHP = 100;
