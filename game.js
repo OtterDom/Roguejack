@@ -34,6 +34,7 @@ function setOtterState(state, duration = 500) {
 // Roguejack core logic split into classes for easier extension
 
 function setHPUI(barEl, current, max) {
+    if (!barEl) return;
     const value = Math.max(0, Math.min(current, max));
     const pct = (value / max) * 100;
     barEl.style.width = pct + "%";
@@ -79,9 +80,25 @@ function getSuitData(suit) {
     }
 }
 
+function formatHandText(hand, hideFirst = false) {
+    return hand.map((card, idx) => {
+        if (hideFirst && idx === 0) {
+            return "?";
+        }
+        const { icon } = getSuitData(card.suit);
+        return `${getCardLabel(card.value)}${icon}`;
+    }).join(" ");
+}
+
 function renderHand(hand, containerId, hideFirst = false) {
     const container = document.getElementById(containerId);
-    if (!container) return;
+    if (!container) {
+        const fallbackId = containerId.includes("player") ? "playerCards" : "enemyCards";
+        const fallback = document.getElementById(fallbackId);
+        if (!fallback) return;
+        fallback.textContent = formatHandText(hand, hideFirst);
+        return;
+    }
     container.innerHTML = "";
     hand.forEach((card, idx) => {
         const div = document.createElement("div");
@@ -112,6 +129,69 @@ function renderHand(hand, containerId, hideFirst = false) {
 
 function wait(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+let damageLock = false;
+let damageTimeout = null;
+let flashTimeout = null;
+let stutterTimeout = null;
+let damageNumberEl = null;
+let flashEl = null;
+let sceneEl = null;
+
+function playDamageFx(targetEl, amount) {
+    if (!targetEl) return;
+    if (damageLock) return;
+    damageLock = true;
+
+    if (!damageNumberEl) {
+        damageNumberEl = document.getElementById("damage-number");
+    }
+    if (!flashEl) {
+        flashEl = document.getElementById("screen-flash");
+    }
+    if (!sceneEl) {
+        sceneEl = document.querySelector(".scene");
+    }
+
+    const rect = targetEl.getBoundingClientRect();
+    if (damageNumberEl) {
+        damageNumberEl.textContent = `-${amount}`;
+        damageNumberEl.style.left = rect.left + rect.width / 2 + "px";
+        damageNumberEl.style.top = rect.top + "px";
+        damageNumberEl.classList.remove("active");
+        void damageNumberEl.offsetWidth;
+        damageNumberEl.classList.add("active");
+        if (damageTimeout) clearTimeout(damageTimeout);
+        damageTimeout = setTimeout(() => {
+            damageNumberEl.classList.remove("active");
+        }, 1200);
+    }
+
+    targetEl.classList.add("hit");
+    setTimeout(() => targetEl.classList.remove("hit"), 180);
+
+    if (flashEl) {
+        flashEl.classList.remove("active");
+        void flashEl.offsetWidth;
+        flashEl.classList.add("active");
+        if (flashTimeout) clearTimeout(flashTimeout);
+        flashTimeout = setTimeout(() => {
+            flashEl.classList.remove("active");
+        }, 200);
+    }
+
+    if (sceneEl) {
+        sceneEl.classList.add("stutter");
+        if (stutterTimeout) clearTimeout(stutterTimeout);
+        stutterTimeout = setTimeout(() => {
+            sceneEl.classList.remove("stutter");
+        }, 120);
+    }
+
+    setTimeout(() => {
+        damageLock = false;
+    }, 120);
 }
 
 function cleanTransparentBackground(imgEl, threshold = 245) {
@@ -233,23 +313,57 @@ const ENEMY_TYPES = [
 ];
 
 class Logger {
-    constructor(playerLogEl, enemyLogEl) {
+    constructor(playerLogEl, enemyLogEl, historyEl) {
         this.playerLogEl = playerLogEl;
         this.enemyLogEl = enemyLogEl;
+        this.historyEl = historyEl;
+        this.historyLimit = 80;
     }
 
     log(message, target = "both") {
         const type = this.detectType(message);
-        if (target === "both" || target === "player") {
+        if (target === "both") {
+            const primary = this.playerLogEl || this.enemyLogEl;
+            this.append(primary, message, type);
+            return;
+        }
+        if (target === "player") {
             this.append(this.playerLogEl, message, type);
         }
-        if (target === "both" || target === "enemy") {
+        if (target === "enemy") {
             this.append(this.enemyLogEl, message, type);
         }
     }
 
+    formatMessage(message) {
+        const compact = String(message).replace(/\s+/g, " ").trim();
+        return compact.length > 180 ? compact.slice(0, 177) + "..." : compact;
+    }
+
+    logHistory(message, type = "info") {
+        const trimmed = this.formatMessage(message);
+        this.appendHistory(trimmed, type);
+    }
+
+    appendHistory(message, type) {
+        if (!this.historyEl) return;
+        const entry = document.createElement("div");
+        entry.className = "log-item log-" + type;
+        entry.textContent = message;
+        this.historyEl.appendChild(entry);
+        while (this.historyEl.children.length > this.historyLimit) {
+            this.historyEl.removeChild(this.historyEl.firstChild);
+        }
+        this.historyEl.scrollTop = this.historyEl.scrollHeight;
+    }
+
     append(element, message, type) {
-        if (!element) return;
+        const trimmed = this.formatMessage(message);
+        if (!element) {
+            this.appendHistory(trimmed, type);
+            return;
+        }
+        element.innerHTML = "";
         const entry = document.createElement("div");
         entry.className = "log-entry " + type;
 
@@ -259,19 +373,20 @@ class Logger {
 
         const text = document.createElement("span");
         text.className = "text";
-        text.textContent = message;
+        text.textContent = trimmed;
 
         entry.appendChild(icon);
         entry.appendChild(text);
         element.appendChild(entry);
         element.scrollTop = element.scrollHeight;
+        this.appendHistory(trimmed, type);
     }
 
     detectType(message) {
         const m = message.toLowerCase();
         if (m.includes("crit")) return "crit";
         if (m.includes("heal")) return "heal";
-        if (m.includes("damage") || m.includes("bust") || m.includes("died")) return "damage";
+        if (m.includes("damage") || m.includes("schaden") || m.includes("bust") || m.includes("died")) return "damage";
         return "info";
     }
 
@@ -286,10 +401,17 @@ class Logger {
 
     clear(target = "both") {
         if (target === "both" || target === "player") {
-            this.playerLogEl.innerHTML = "";
+            if (this.playerLogEl) {
+                this.playerLogEl.innerHTML = "";
+            }
         }
         if (target === "both" || target === "enemy") {
-            this.enemyLogEl.innerHTML = "";
+            if (this.enemyLogEl) {
+                this.enemyLogEl.innerHTML = "";
+            }
+        }
+        if (target === "both" && this.historyEl) {
+            this.historyEl.innerHTML = "";
         }
     }
 }
@@ -424,9 +546,24 @@ class CardDeck {
     }
 
     shuffleDeck(deck) {
+        const getRandomInt = (max) => {
+            if (max <= 0) return 0;
+            if (typeof crypto !== "undefined" && crypto.getRandomValues) {
+                const buf = new Uint32Array(1);
+                const range = 0x100000000;
+                const limit = range - (range % max);
+                let x = 0;
+                do {
+                    crypto.getRandomValues(buf);
+                    x = buf[0];
+                } while (x >= limit);
+                return x % max;
+            }
+            return Math.floor(Math.random() * max);
+        };
         let currentIndex = deck.length, randomIndex;
         while (currentIndex !== 0) {
-            randomIndex = Math.floor(Math.random() * currentIndex);
+            randomIndex = getRandomInt(currentIndex);
             currentIndex--;
             [deck[currentIndex], deck[randomIndex]] = [
                 deck[randomIndex], deck[currentIndex]
@@ -819,6 +956,8 @@ class CombatEngine {
         this.playAttackAnimation(attacker, target);
 
         target.takeDamage(calc.final);
+        const targetEl = document.getElementById(target.side === "player" ? "player-row" : "enemy-row");
+        playDamageFx(targetEl, calc.final);
 
         this.logDamageDetails(target, cause, calc, calc.final, false);
 
@@ -846,7 +985,7 @@ class CombatEngine {
             this.updateSkillButtons();
             this.dealing = false;
             this.player.isDoublingDown = false;
-            this.showShop();
+            await this.showShop();
             return;
         }
 
@@ -947,19 +1086,30 @@ class CombatEngine {
 
     updateFloorUI() {
         const el = document.getElementById("floor-level");
-        if (!el) return;
-        el.textContent = `Floor: ${floorLevel}`;
+        const simple = document.getElementById("floor");
+        if (el) {
+            el.textContent = `Floor: ${floorLevel}`;
+        }
+        if (simple) {
+            simple.textContent = floorLevel;
+        }
     }
 
     updateGoldUI() {
-        const el = document.getElementById("gold-indicator");
-        if (!el) return;
-        el.textContent = `Gold: ${playerGold}`;
+        const legacy = document.getElementById("gold-indicator");
+        const simple = document.getElementById("gold");
+        if (legacy) {
+            legacy.textContent = `Gold: ${playerGold}`;
+        }
+        if (simple) {
+            simple.textContent = playerGold;
+        }
     }
 
     updateEnergyUI() {
         const el = document.getElementById("energy-display");
         const legacy = document.getElementById("energy-indicator");
+        const simple = document.getElementById("energy");
         const value = this.player.energy ?? 0;
         if (el) {
             const valueEl = el.querySelector(".energy-value");
@@ -971,6 +1121,9 @@ class CombatEngine {
         }
         if (legacy) {
             legacy.textContent = `Energy: ${value}`;
+        }
+        if (simple) {
+            simple.textContent = value;
         }
     }
 
@@ -1067,16 +1220,22 @@ class CombatEngine {
 
     logDamageDetails(target, cause, calc, finalApplied, blocked = false) {
         const targetLabel = target === this.player ? "Dein" : "Enemy";
+        const targetShort = target === this.player ? "Du" : "Enemy";
         const hpText = `${target.hp}/${target.maxHP}`;
         const heading = blocked
             ? `\ud83d\udee1\ufe0f AEGIS aktiviert: ${calc.final} Schaden abgewehrt (0 erhalten)! (${cause})`
             : `\u2694\ufe0f Schaden (${cause})`;
-        const modifiersText = calc.modifiers.length ? `• Modifikatoren: ${calc.modifiers.join(", ")}` : "• Modifikatoren: keine";
+        if (finalApplied > 0 && !blocked) {
+            this.logger.logHistory(`${targetShort} erleidet ${finalApplied} Schaden.`, "damage");
+        } else if (blocked) {
+            this.logger.logHistory(`${targetShort} blockt den Treffer (0 Schaden).`, "info");
+        }
+        const modifiersText = calc.modifiers.length ? `- Modifikatoren: ${calc.modifiers.join(", ")}` : "- Modifikatoren: keine";
         const lines = [
             heading,
-            `• Basis-Schaden: ${calc.base} HP`,
+            `- Basis-Schaden: ${calc.base} HP`,
             modifiersText,
-            `• Finaler Schaden: ${finalApplied} HP`,
+            `- Finaler Schaden: ${finalApplied} HP`,
             `${targetLabel} neues HP: ${hpText}`
         ].join("\n");
         this.logger.log(lines, "both");
@@ -1139,7 +1298,7 @@ class CombatEngine {
         this.updateUI();
     }
 
-    showShop() {
+    async showShop() {
         const shop = document.getElementById("shop-screen");
         const title = document.getElementById("shop-title");
         if (shop) {
@@ -1147,6 +1306,9 @@ class CombatEngine {
         }
         if (title) {
             title.textContent = `The Wanderer's Emporium (Floor ${floorLevel})`;
+        }
+        if (!shop) {
+            await this.hideShopAndContinue();
         }
     }
 
@@ -1164,11 +1326,27 @@ class CombatEngine {
     updateHPText() {
         const playerText = document.getElementById("player-hp-text");
         const enemyText = document.getElementById("enemy-hp-text");
+        const simplePlayer = document.getElementById("playerHP");
+        const simpleEnemy = document.getElementById("enemyHP");
+        const simplePlayerMax = document.getElementById("playerHPMax");
+        const simpleEnemyMax = document.getElementById("enemyHPMax");
         if (playerText) {
             playerText.innerText = `${this.player.hp}/${this.player.maxHP}`;
         }
         if (enemyText) {
             enemyText.innerText = `${this.enemy.hp}/${this.enemy.maxHP}`;
+        }
+        if (simplePlayer) {
+            simplePlayer.textContent = this.player.hp;
+        }
+        if (simpleEnemy) {
+            simpleEnemy.textContent = this.enemy.hp;
+        }
+        if (simplePlayerMax) {
+            simplePlayerMax.textContent = this.player.maxHP;
+        }
+        if (simpleEnemyMax) {
+            simpleEnemyMax.textContent = this.enemy.maxHP;
         }
     }
 
@@ -1245,8 +1423,9 @@ class CombatEngine {
 
 document.addEventListener("DOMContentLoaded", () => {
     const logger = new Logger(
-        document.getElementById("playerLog"),
-        document.getElementById("enemyLog")
+        document.getElementById("playerLog") || document.getElementById("combatMessage"),
+        document.getElementById("enemyLog") || document.getElementById("enemyMessage"),
+        document.getElementById("log-list")
     );
 
     const deck = new CardDeck(document.getElementById("draw-anim-container"));
@@ -1281,7 +1460,7 @@ document.addEventListener("DOMContentLoaded", () => {
         overlay: null,
         overlayTitle: null,
         enemyIconImg: document.getElementById("enemyIconImg"),
-        enemyIconName: document.getElementById("enemyIconName"),
+        enemyIconName: document.getElementById("enemyIconName") || document.getElementById("enemyName"),
         dealerDeckEl: document.getElementById("dealer-deck"),
         dealerHandEl: document.getElementById("dealer-box"),
         controls: {
@@ -1309,6 +1488,28 @@ document.addEventListener("DOMContentLoaded", () => {
     }
 
     engine.init();
+
+    const logButton = document.getElementById("log-button");
+    const logModal = document.getElementById("log-modal");
+    const logClose = document.getElementById("log-close");
+    const setLogOpen = (open) => {
+        if (!logModal) return;
+        logModal.classList.toggle("active", open);
+        logModal.setAttribute("aria-hidden", open ? "false" : "true");
+    };
+    if (logButton) {
+        logButton.addEventListener("click", () => setLogOpen(true));
+    }
+    if (logClose) {
+        logClose.addEventListener("click", () => setLogOpen(false));
+    }
+    if (logModal) {
+        logModal.addEventListener("click", (event) => {
+            if (event.target === logModal) {
+                setLogOpen(false);
+            }
+        });
+    }
 
     otterSprites.idle.onload = () => renderOtter("idle");
     renderOtter("idle");
